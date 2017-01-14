@@ -1,0 +1,289 @@
+<!doctype html>
+
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Taxi Map</title>
+  <script src="http://cdn.leafletjs.com/leaflet/v0.7.7/leaflet.js"></script>
+  <script src="leaflet-heat.js"></script>
+  <link rel="stylesheet" href="http://cdn.leafletjs.com/leaflet/v0.7.7/leaflet.css" />
+  <style type="text/css">
+      #mapid 
+      {
+        position: absolute;
+        width: 100%;
+        height: 100%;
+      }
+      body
+      {
+        padding: 0;
+        margin: 0;
+      }
+      #locBtn
+      {
+        position: absolute;
+        right: 0;
+        bottom: 32px;
+      }
+      #heatMapBtn
+      {
+        position: absolute;
+        right: 0;
+        bottom: 52px;
+      }
+  </style>
+</head>
+
+<body>
+  <div id="mapid"></div>
+  <button id="locBtn">Show Locations</button>
+  <button id="heatMapBtn">Hide Heat Map</button>
+  
+  <script>
+    function HaverSine(coord1, coord2)
+    {
+        var R = 6371000; // metres
+        var φ1 = coord1[0] / 180.0 * Math.PI;
+        var φ2 = coord2[0] / 180.0 * Math.PI;
+        var Δφ = φ2 - φ1;
+        var Δλ = (coord2[1]-coord1[1]) / 180.0 * Math.PI;
+
+        var a = Math.sin(Δφ/2) * Math.sin(Δφ/2) +
+                Math.cos(φ1) * Math.cos(φ2) *
+                Math.sin(Δλ/2) * Math.sin(Δλ/2);
+        var c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+
+        var d = R * c;
+        return d;
+    }
+    
+    function Bearing(coord1, coord2)
+    {
+        var y = Math.sin(coord2[1]-coord1[1]) * Math.cos(coord2[0]);
+        var x = Math.cos(coord1[0])*Math.sin(coord2[0]) -
+        Math.sin(coord1[0])*Math.cos(coord2[0])*Math.cos(coord2[1]-coord1[1]);
+        var brng = Math.atan2(y, x) / Math.PI * 180.0;
+        return brng;
+    }
+    
+    function ExtractLocationsFromJSON(aJSONStr)
+    {
+        var pattern = /\[(-?\d+(?:\.\d+)?),(-?\d+(?:\.\d+)?)\]/g;
+        var match = pattern.exec(aJSONStr);
+        var result = []
+        while (match != null)
+        {
+            var coord = [parseFloat(match[2]), parseFloat(match[1])];         
+            result.push(coord);         
+            match = pattern.exec(aJSONStr);            
+        }
+        return result;
+    }
+        
+        
+    function Cluster(aCoord, aDistThresh)
+    {
+        var currGrpNum = 0;
+        var isGrouped = {};
+        for (var i = 0; i < aCoord.length; ++i)
+        {
+            if (!(i in isGrouped))
+                isGrouped[i] = currGrpNum++;
+            for (var j = i + 1; j < aCoord.length; ++j)
+            {     
+                if (HaverSine(aCoord[i], aCoord[j]) <= aDistThresh)
+                {                
+                    if (j in isGrouped)                    
+                    {
+                        if (isGrouped[j] != isGrouped[i])
+                        {
+                            //console.log("Concat clusters " + isGrouped[i] + " and " + isGrouped[j]);
+                            var arrOfUpdatePos = [];   
+                            var newGrpNum = isGrouped[i];
+                            for (var key in isGrouped)
+                            {
+                                if (isGrouped[key] == isGrouped[j])
+                                    arrOfUpdatePos.push(key);
+                            }                                                        
+                            for (var k = 0; k < arrOfUpdatePos.length; ++k)
+                                isGrouped[arrOfUpdatePos[k]] = isGrouped[i];
+                        }
+                    }
+                    else                    
+                        isGrouped[j] = isGrouped[i];                    
+                }               
+            }
+        }      
+        var knownGroups = {};
+        var groups = [];
+        for (var key in isGrouped)
+        {
+            if (!(isGrouped[key] in knownGroups))
+            {            
+                var newGrp = [aCoord[key]];
+                knownGroups[isGrouped[key]] = newGrp;
+                //console.log(isGrouped[key] + " -> " + groups.length);
+                groups.push(newGrp);                
+            }            
+            else
+                knownGroups[isGrouped[key]].push(aCoord[key]);
+        }
+        
+        return groups;
+    }
+    
+    function AreSeparateClusters(aCluster1, aCluster2, aDistThresh)
+    {
+        for (var i = 0; i < aCluster1.length; ++i)
+        {
+            for (var j = 0; j < aCluster2.length; ++j)
+            {
+                if (HaverSine(aCluster1[i], aCluster2[j]) <= aDistThresh)
+                    return false
+            }
+        }
+        
+        return true;
+    }
+    
+    function TestCluster(aClusters, aDistThresh)
+    {
+        for (var i = 0; i < aClusters.length; ++i)
+        {
+            var currCluster = aClusters[i];
+            
+            for (var j = i + 1; j < aClusters.length; ++j)
+            {
+                if (!AreSeparateClusters(currCluster, aClusters[j], aDistThresh))
+                    return false;
+            }            
+            if (currCluster.length > 1)
+            {
+                for (var k = 0; k < currCluster.length; ++k)
+                {
+                    var foundMatch = false;
+                    for (var z = 0; z < currCluster.length; ++z)
+                    {
+                        if (z != k && HaverSine(currCluster[k], currCluster[z]) <= aDistThresh)
+                        {
+                            foundMatch = true;
+                            break;
+                        }
+                    }
+                    
+                    if (!foundMatch)
+                        return false;
+                }
+            }
+        }
+        
+        return true;
+    }    
+    
+    function GetCentroidAndRadius(aCluster)
+    {
+        var sumLat = 0;
+        var sumLon = 0;
+        for (var i = 0; i < aCluster.length; ++i)
+        {
+            sumLat += aCluster[i][0];
+            sumLon += aCluster[i][1];
+        }
+        var centroid = [sumLat / aCluster.length, sumLon / aCluster.length];
+        var maxDist =  Number.NEGATIVE_INFINITY;
+        for (var i = 0; i < aCluster.length; ++i)
+            maxDist = Math.max(HaverSine(aCluster[i], centroid), maxDist);
+        return [centroid, maxDist];
+    }        
+    
+    function GetAndPlotLocations(aJSONLocations)
+    {
+        //Extract locations from JSON
+        loc = ExtractLocationsFromJSON(aJSONLocations);
+        //Initialise button display/hide exact taxi locations
+        var locBtn = document.getElementById('locBtn');
+        locBtn.onclick = function()
+        {        
+            if (locBtn.innerHTML == 'Show Locations')
+            {             
+                if (typeof locMarkers === 'undefined')
+                {
+                    locMarkers = [];
+                    for (var i = 0; i < loc.length; ++i)
+                    {
+                        var circle = L.circle(loc[i], 3, {
+                            color: 'blue',
+                            fillColor: 'blue',
+                            fillOpacity: 0.5
+                        });
+                        locMarkers.push(circle);                        
+                    }
+                }
+                for (var i = 0; i < locMarkers.length; ++i)
+                    locMarkers[i].addTo(mymap);
+                locBtn.innerHTML = "Hide Locations";                       
+            }
+            else
+            {                
+                for (var i = 0; i < locMarkers.length; ++i)
+                    mymap.removeLayer(locMarkers[i]);
+                locBtn.innerHTML = "Show Locations";
+            }
+        };
+        var heatMapArr = [];
+        for (var i = 0; i < loc.length; ++i)
+            heatMapArr.push(loc[i]);
+        var heatMapLayer = L.heatLayer(heatMapArr, {radius: 25}).addTo(mymap);
+        var heatMapBtn = document.getElementById('heatMapBtn');
+        heatMapBtn.onclick = function()
+        {
+            if (heatMapBtn.innerHTML == "Show Heat Map")
+            {
+                heatMapLayer.addTo(mymap);
+                heatMapBtn.innerHTML = "Hide Heat Map";
+            }
+            else
+            {
+                mymap.removeLayer(heatMapLayer);
+                heatMapBtn.innerHTML = "Show Heat Map";
+            }
+        };
+        
+        //Cluster the points such that all points in a cluster are within 300 metres of at least 1 other point
+        //clusters = Cluster(loc, 300);
+        
+        //Calculate centroid and maximum radius of each cluster
+        //and draw a circle representing them, with the center being the centroid 
+        //and the radius being the distance of the furthest point from the centroid.
+        /*for (var i = 0; i < clusters.length; ++i)
+        {
+            var circleInfo = GetCentroidAndRadius(clusters[i]);
+            var circle = L.circle(circleInfo[0], circleInfo[1], {
+                color: 'blue',
+                fillColor: 'blue',
+                fillOpacity: 0.5
+            }).addTo(mymap);
+        }*/        
+    }    
+  
+    //Initialise map
+    var mymap = L.map('mapid').setView([1.3521, 103.8198], 12);
+    L.tileLayer('https://api.tiles.mapbox.com/v4/{id}/{z}/{x}/{y}.png?access_token={accessToken}', {
+    attribution: 'Map data &copy; <a href="http://openstreetmap.org">OpenStreetMap</a> contributors, <a href="http://creativecommons.org/licenses/by-sa/2.0/">CC-BY-SA</a>, Imagery © <a href="http://mapbox.com">Mapbox</a>',
+    maxZoom: 18,
+    id: 'caixin.03pel506',
+    accessToken: 'pk.eyJ1IjoiY2FpeGluIiwiYSI6ImNpbzNvOHUweDAxZDJ2cGtqcnc1ZjMxbm4ifQ.AQMKaR5X6OC9e7FSPHzGyQ'}).addTo(mymap);
+    
+    //Send HTTP GET and trigger marking of maps once response is received
+    var xmlHttp = new XMLHttpRequest();
+    xmlHttp.onreadystatechange = function() { 
+        if (xmlHttp.readyState == 4 && xmlHttp.status == 200)            
+            GetAndPlotLocations(xmlHttp.responseText);                   
+    }
+    xmlHttp.open('GET', 'https://api.data.gov.sg/v1/transport/taxi-availability', true); // true for asynchronous
+    xmlHttp.setRequestHeader('api-key', 'VZgeoZY5Oi6wRKPwtdO9P2KfWAf3ywiO')
+    xmlHttp.send(null);    
+  </script>
+</body>
+</html>
